@@ -1,82 +1,145 @@
-// Dependencies
-var express = require("express");
-var mongojs = require("mongojs");
-// Require request and cheerio. This makes the scraping possible
-var request = require("request");
-var cheerio = require("cheerio");
+'use strict';
 
-// Initialize Express
-var app = express();
+// Modules
+const express    = require('express'),
+      exphbs     = require('express-handlebars'),
+      bodyParser = require('body-parser'),
+      logger     = require('morgan'),
+      mongoose   = require('mongoose'),
+      Promise    = require('bluebird'),
+      cheerio    = require('cheerio'),
+      rp         = require('request-promise'),
 
-// Database configuration
-var databaseUrl = "scraper";
-var collections = ["scrapedData"];
+      // Local dependencies
+      Article    = require('./models/Article.js'),
+      Comment    = require('./models/Comment.js'),
 
-// Hook mongojs configuration to the db variable
-var db = mongojs(databaseUrl, collections);
-db.on("error", function(error) {
-  console.log("Database Error:", error);
+      // Const vars
+      app    = express(),
+      hbs    = exphbs.create({ defaultLayout: 'main', extname: '.hbs' }),
+      PORT   = process.env.PORT || 3000,
+      DB_URI = process.env.MONGODB_URI || require('./mongodb_uri.json').LOCAL_URI;
+
+// Handlebars init
+app.engine('.hbs', hbs.engine);
+app.set('view engine', '.hbs');
+if (process.env.PORT) app.enable('view cache');  // Disable view cache for local testing
+
+// Morgan for logging
+app.use(logger('dev'));
+
+// Body parser init
+app.use(bodyParser.json());
+app.use(bodyParser.json({ type: 'application/vnd.api+json' }));
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.text());
+
+// Route for static content
+app.use(express.static(process.cwd() + '/public'));
+
+// Mongoose init
+mongoose.Promise = Promise;
+mongoose.connect(DB_URI);
+const db = mongoose.connection;
+
+db.on('error', function (err) {
+  console.log('Mongoose Error: ', err);
 });
 
-// Main route (simple Hello World Message)
-app.get("/", function(req, res) {
-  res.send("Hello world");
+db.once('open', function () {
+  console.log('Mongoose connection successful.');
 });
 
-// Retrieve data from the db
-app.get("/all", function(req, res) {
-  // Find all results from the scrapedData collection in the db
-  db.scrapedData.find({}, function(error, found) {
-    // Throw any errors to the console
-    if (error) {
-      console.log(error);
-    }
-    // If there are no errors, send the data to the browser as json
-    else {
-      res.json(found);
-    }
-  });
-});
 
-// Scrape data from one site and place it into the mongodb db
-app.get("/scrape", function(req, res) {
-  // Make a request for the news section of ycombinator
-  request("https://news.ycombinator.com/", function(error, response, html) {
-    // Load the html body from request into cheerio
-    var $ = cheerio.load(html);
-    // For each element with a "title" class
-    $(".title").each(function(i, element) {
-      // Save the text and href of each link enclosed in the current element
-      var title = $(element).children("a").text();
-      var link = $(element).children("a").attr("href");
 
-      // If this found element had both a title and a link
-      if (title && link) {
-        // Insert the data in the scrapedData db
-        db.scrapedData.insert({
-          title: title,
-          link: link
-        },
-        function(err, inserted) {
-          if (err) {
-            // Log the error if one is encountered during the query
-            console.log(err);
-          }
-          else {
-            // Otherwise, log the inserted data
-            console.log(inserted);
-          }
-        });
+// Render main site index
+app.get('/', (req, res) => {
+  rp('http://www.nytimes.com/pages/todayspaper').then(html => {
+    const $ = cheerio.load(html),
+          promises = [];
+
+    $('h3').each(function(i, element) {
+      const link    = $(element).find('a').attr('href'),
+            title   = $(element).find('a').text().trim(),
+            summary = $(element).next().next().text().trim();
+
+      if (title) {
+        promises.unshift(new Promise((resolve, reject) => {
+          Article.update(
+            { link: link },   // only create new entry if link does not exist in Articles
+            { $setOnInsert:
+              {
+                link: link,
+                title: title,
+                summary: summary
+              }
+            },
+            {
+              upsert: true,
+              setDefaultsOnInsert: true
+            }
+          ).then(article =>
+            resolve(article)
+          );
+        }));
       }
     });
-  });
 
-  // Send a "Scrape Complete" message to the browser
-  res.send("Scrape Complete");
+    // When all updates are resolved, continue
+    Promise.all(promises).then(() =>
+      Article.find({}).sort({ date: 1 }).limit(1).populate('comments').exec((err, doc) =>
+        res.render('index', {article: doc[0]})
+      )
+    );
+  });
 });
 
 
-// Listen on port 3000
-app.listen(3000, function() {
-  console.log("App running on port 3000!");
+// Additional routes
+app.get('/articles', (req, res) => {
+  Article.find({}).sort({ date: 1 }).limit(10).populate('comments').exec((err, docs) =>
+    res.json(docs)
+  )
+});
+
+app.get('/comments/:id', (req, res) => {
+  Article.findById(req.params.id).populate('comments').exec((err, doc) =>
+    res.json(doc.comments)
+  )
+});
+
+app.post('/', (req, res) => {
+  Comment.create({comment: req.body.comment}).then(comment => {
+    console.log(comment);
+    Article.findByIdAndUpdate(
+      req.body.id,
+      { $push: { "comments": comment._id } }
+    ).then(() =>
+      res.json(comment)
+    )
+  })
+});
+
+app.delete('/', (req, res) => {
+  Article.findById(req.body.id).then(article => {
+    const promises = [];
+
+    for (const id of article.comments) {
+      promises.push(new Promise((resolve, reject) => {
+        Comment.remove({ _id: id}).then(data => resolve(data));
+      }));
+    }
+
+    Promise.all(promises).then(data => {
+      article.comments = [];
+      article.save().then(() => res.json(data));
+    });
+  })
+});
+
+
+
+// Init server
+app.listen(PORT, function () {
+  console.log(`App listening on port ${PORT}`);
 });
