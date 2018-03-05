@@ -1,5 +1,4 @@
 body {
-	background: url(/assets/img/fba7da61.png);
 	font-family: 'Lora', serif;
 	font-size: 150%;
 }
@@ -30,8 +29,6 @@ select {
 #done {
 	color: lightgrey;
 }
-
-/* Custom classes */
 
 .min-height-200 {
 	min-height: 200px;
