@@ -4,7 +4,9 @@ body {
 	font-size: 150%;
 }
 
-body, h1, h2 {
+body,
+h1,
+h2 {
 	font-weight: 600;
 }
 
@@ -30,6 +32,7 @@ select {
 }
 
 /* Custom classes */
+
 .min-height-200 {
 	min-height: 200px;
 }
